@@ -1,63 +1,120 @@
-#
-# En este dataset se desea pronosticar el precio de vhiculos usados. El dataset
-# original contiene las siguientes columnas:
-#
-# - Car_Name: Nombre del vehiculo.
-# - Year: Año de fabricación.
-# - Selling_Price: Precio de venta.
-# - Present_Price: Precio actual.
-# - Driven_Kms: Kilometraje recorrido.
-# - Fuel_type: Tipo de combustible.
-# - Selling_Type: Tipo de vendedor.
-# - Transmission: Tipo de transmisión.
-# - Owner: Número de propietarios.
-#
-# El dataset ya se encuentra dividido en conjuntos de entrenamiento y prueba
-# en la carpeta "files/input/".
-#
-# Los pasos que debe seguir para la construcción de un modelo de
-# pronostico están descritos a continuación.
-#
-#
-# Paso 1.
-# Preprocese los datos.
-# - Cree la columna 'Age' a partir de la columna 'Year'.
-#   Asuma que el año actual es 2021.
-# - Elimine las columnas 'Year' y 'Car_Name'.
-#
-#
-# Paso 2.
-# Divida los datasets en x_train, y_train, x_test, y_test.
-#
-#
-# Paso 3.
-# Cree un pipeline para el modelo de clasificación. Este pipeline debe
-# contener las siguientes capas:
-# - Transforma las variables categoricas usando el método
-#   one-hot-encoding.
-# - Escala las variables numéricas al intervalo [0, 1].
-# - Selecciona las K mejores entradas.
-# - Ajusta un modelo de regresion lineal.
-#
-#
-# Paso 4.
-# Optimice los hiperparametros del pipeline usando validación cruzada.
-# Use 10 splits para la validación cruzada. Use el error medio absoluto
-# para medir el desempeño modelo.
-#
-#
-# Paso 5.
-# Guarde el modelo (comprimido con gzip) como "files/models/model.pkl.gz".
-# Recuerde que es posible guardar el modelo comprimido usanzo la libreria gzip.
-#
-#
-# Paso 6.
-# Calcule las metricas r2, error cuadratico medio, y error absoluto medio
-# para los conjuntos de entrenamiento y prueba. Guardelas en el archivo
-# files/output/metrics.json. Cada fila del archivo es un diccionario con
-# las metricas de un modelo. Este diccionario tiene un campo para indicar
-# si es el conjunto de entrenamiento o prueba. Por ejemplo:
-#
-# {'type': 'metrics', 'dataset': 'train', 'r2': 0.8, 'mse': 0.7, 'mad': 0.9}
-# {'type': 'metrics', 'dataset': 'test', 'r2': 0.7, 'mse': 0.6, 'mad': 0.8}
-#
+import gzip
+import json
+import os
+import pickle
+
+import pandas as pd
+from sklearn.compose import ColumnTransformer
+from sklearn.feature_selection import SelectKBest, f_regression
+from sklearn.linear_model import LinearRegression
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+from sklearn.model_selection import GridSearchCV
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import MinMaxScaler, OneHotEncoder
+
+# Paso 1: Preprocesamiento
+def cargar_y_limpiar(ruta):
+    df = pd.read_csv(ruta, index_col=False, compression="zip")
+    df["Age"] = 2021 - df["Year"]
+    df.drop(columns=["Year", "Car_Name"], inplace=True)
+    return df
+
+
+# Paso 2: División en X e y
+def separar_features_target(df):
+    x = df.drop(columns=["Present_Price"])
+    y = df["Present_Price"]
+    return x, y
+
+
+# Paso 3: Pipeline
+def construir_pipeline():
+    categoricas = ["Fuel_Type", "Selling_type", "Transmission", "Owner"]
+    numericas = ["Selling_Price", "Driven_kms", "Age"]
+
+    transformador = ColumnTransformer(
+        transformers=[
+            ("ohe", OneHotEncoder(handle_unknown="ignore"), categoricas),
+            ("scaler", MinMaxScaler(), numericas),
+        ],
+        remainder="passthrough",
+    )
+
+    pipeline = Pipeline(
+        steps=[
+            ("preprocesamiento", transformador),
+            ("SelectKBest", SelectKBest(score_func=f_regression)),
+            ("modelo", LinearRegression()),
+        ]
+    )
+    return pipeline
+
+
+# Paso 4: Optimización de hiperparámetros
+def optimizar(x_train, y_train):
+    param_grid = {
+        "SelectKBest__k": list(range(1, 20)),
+    }
+
+    busqueda = GridSearchCV(
+        estimator=construir_pipeline(),
+        param_grid=param_grid,
+        cv=10,
+        scoring="neg_mean_squared_error",
+        n_jobs=-1,
+        verbose=2,
+    )
+
+    busqueda.fit(x_train, y_train)
+    return busqueda
+
+
+# Paso 5: Guardar modelo
+def guardar_modelo(modelo):
+    os.makedirs("files/models", exist_ok=True)
+    with gzip.open("files/models/model.pkl.gz", "wb") as f:
+        pickle.dump(modelo, f)
+
+
+# Paso 6: Métricas
+def calcular_metricas(nombre, y_real, y_pred):
+    return {
+        "type": "metrics",
+        "dataset": nombre,
+        "r2": round(r2_score(y_real, y_pred), 4),
+        "mse": round(mean_squared_error(y_real, y_pred), 4),
+        "mad": round(mean_absolute_error(y_real, y_pred), 4),
+    }
+
+
+def guardar_metricas(lista_metricas):
+    os.makedirs("files/output", exist_ok=True)
+    with open("files/output/metrics.json", "w", encoding="utf-8") as f:
+        for m in lista_metricas:
+            f.write(json.dumps(m) + "\n")
+
+
+def main():
+    train = cargar_y_limpiar("files/input/train_data.csv.zip")
+    test = cargar_y_limpiar("files/input/test_data.csv.zip")
+
+    x_train, y_train = separar_features_target(train)
+    x_test, y_test = separar_features_target(test)
+
+    modelo = optimizar(x_train, y_train)
+
+    guardar_modelo(modelo)
+
+    pred_train = modelo.predict(x_train)
+    pred_test = modelo.predict(x_test)
+
+    metricas = [
+        calcular_metricas("train", y_train, pred_train),
+        calcular_metricas("test", y_test, pred_test),
+    ]
+
+    guardar_metricas(metricas)
+
+
+if __name__ == "__main__":
+    main()
